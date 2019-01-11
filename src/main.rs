@@ -20,6 +20,7 @@ use simplelog::*;
 use std::fs::File;
 
 const CASS_UUID_STRING_LENGTH: usize = 37;
+static mut VAR: u128 = 0;
 
 fn select_from_list_udt(session: &mut CassSession, condition: &str, keyspace: &str ,table_name: &str, primary_key: &'static str, column_value: &str) -> Result<(), CassError> {
     unsafe {
@@ -70,20 +71,22 @@ fn select_from_list_udt(session: &mut CassSession, condition: &str, keyspace: &s
                                             info!("\"{:?}\" ", raw2utf8(text, text_length));
                                         }
                                         CASS_VALUE_TYPE_VARINT => {
-                                            let mut i = mem::zeroed();
-                                            let mut i_length = mem::zeroed();
+                                            let mut var = mem::zeroed();
+                                            let mut var_length = mem::zeroed();
 
-                                            cass_value_get_bytes(items_number_value, &mut i, &mut i_length);
+                                            cass_value_get_bytes(items_number_value, &mut var, &mut var_length);
 
-                                            let mut slice = slice::from_raw_parts(i, i_length);
+                                            let mut slice = slice::from_raw_parts(var, var_length);
                                             debug!("Value Type => {:?}", cass_value_type(items_number_value));
 
-                                            let slice_hex = hex::encode(slice);
-                                            info!("{:?}", slice_hex);
-
-                                            let slice_to_dec = u32::from_str_radix(slice_hex.as_str(), 16).unwrap();
-                                            info!("{:?}", slice_to_dec);
-
+                                            VAR = 0;
+                                            for slice_number in 0..var_length {
+                                                let i = var_length - slice_number- 1;
+                                                let hex_pow = 256u128.pow(i as u32);
+                                                let result = slice[slice_number] as u128 * hex_pow;
+                                                VAR += result;
+                                            }
+                                            warn!("{:?}", VAR);
                                         }
                                         CASS_VALUE_TYPE_BIGINT => {
                                             let mut i = mem::zeroed();
@@ -178,7 +181,7 @@ fn main() {
             }
         }
 
-        select_from_list_udt(session, "new_entry", "examples", "new_user", "deviceid", "Jeremy").unwrap();
+        select_from_list_udt(session, "new_entry", "examples", "new_user", "deviceid", "Paul").unwrap();
 
         let close_future = cass_session_close(session);
         cass_future_wait(close_future);
