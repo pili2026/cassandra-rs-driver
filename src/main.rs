@@ -135,7 +135,6 @@ fn select_from_list_udt(session: &mut CassSession, condition: &str, keyspace: &s
                                             vec.truncate(inet.address_length as usize);
                                             info!("{:?}", vec);
 
-
                                         }
                                         _ => error!("Error"),
                                     }
