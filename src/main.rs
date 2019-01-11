@@ -22,6 +22,7 @@ use std::fs::File;
 const CASS_UUID_STRING_LENGTH: usize = 37;
 static mut VAR: u128 = 0;
 
+
 fn select_from_list_udt(session: &mut CassSession, condition: &str, keyspace: &str ,table_name: &str, primary_key: &'static str, column_value: &str) -> Result<(), CassError> {
     unsafe {
         let query = format!("SELECT {condition} FROM {keyspace}.{table_name} WHERE {primary_key} = ?;",
@@ -86,7 +87,7 @@ fn select_from_list_udt(session: &mut CassSession, condition: &str, keyspace: &s
                                                 let result = slice[slice_number] as u128 * hex_pow;
                                                 VAR += result;
                                             }
-                                            warn!("{:?}", VAR);
+                                            info!("{:?}", VAR);
                                         }
                                         CASS_VALUE_TYPE_BIGINT => {
                                             let mut i = mem::zeroed();
@@ -130,7 +131,10 @@ fn select_from_list_udt(session: &mut CassSession, condition: &str, keyspace: &s
                                             let mut inet = mem::zeroed();
                                             debug!("Value Type => {:?}", cass_value_type(items_number_value));
                                             cass_value_get_inet(items_number_value, &mut inet);
-                                            info!("{:?}", inet.address);
+                                            let mut vec = inet.address.to_vec();
+                                            vec.truncate(inet.address_length as usize);
+                                            info!("{:?}", vec);
+
 
                                         }
                                         _ => error!("Error"),
