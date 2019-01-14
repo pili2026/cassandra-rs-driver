@@ -44,10 +44,12 @@ fn select_condition(session: &mut CassSession, condition: &str, keyspace: &str ,
                     let items_iterator = cass_iterator_from_collection(value);
 
                     if items_iterator.is_null() {
-                        warn!("type is different");
+                        warn!("Single type");
+                        print_value(value);
 
                     } else {
-                        select_from_list_udt(items_iterator);
+                        warn!("Collection type");
+                        select_from_collection(items_iterator);
 
                     }
                     cass_iterator_free(items_iterator);
@@ -66,29 +68,33 @@ fn select_condition(session: &mut CassSession, condition: &str, keyspace: &str ,
     }
 }
 
-fn select_from_list_udt(items_iterator : *mut CassIterator) {
+fn select_from_collection(items_iterator : *mut CassIterator) {
     unsafe {
         while cass_iterator_next(items_iterator) == cass_true {
             let items_value = cass_iterator_get_value(items_iterator);
-            let items_field = cass_iterator_fields_from_user_type(items_value);
 
-            assert_eq!(cass_value_type(items_value), CASS_VALUE_TYPE_UDT);
-            while cass_iterator_next(items_field) == cass_true{
+            match cass_value_type(items_value) {
+                CASS_VALUE_TYPE_UDT => {
+                    let items_field = cass_iterator_fields_from_user_type(items_value);
+                    while cass_iterator_next(items_field) == cass_true{
 
-                let mut item = mem::zeroed();
-                let mut item_length = mem::zeroed();
-                let items_number_value = cass_iterator_get_user_type_field_value(items_field);
+                        let mut item = mem::zeroed();
+                        let mut item_length = mem::zeroed();
+                        let items_number_value = cass_iterator_get_user_type_field_value(items_field);
 
-                cass_iterator_get_user_type_field_name(items_field, &mut item, &mut item_length);
-                warn!("UDT Name: {:?}", raw2utf8(item, item_length));
-                print_schema_value(items_number_value);
+                        cass_iterator_get_user_type_field_name(items_field, &mut item, &mut item_length);
+                        warn!("UDT Name: {:?}", raw2utf8(item, item_length));
+                        print_value(items_number_value);
 
+                    }
+                }
+                _ => print_value(items_value),
             }
         }
     }
 }
 
-unsafe fn print_schema_value(items_number_value : *const CassValue_) {
+unsafe fn print_value(items_number_value : *const CassValue_) {
     match cass_value_is_null(items_number_value) {
         cass_false => {
             match cass_value_type(items_number_value) {
@@ -197,7 +203,7 @@ fn main() {
             }
         }
 
-        select_condition(session, "new_entry", "examples", "new_user", "deviceid", "Jeremy").unwrap();
+        select_condition(session, "title", "test_ks", "user", "first_name", "Paul").unwrap();
 
         let close_future = cass_session_close(session);
         cass_future_wait(close_future);
