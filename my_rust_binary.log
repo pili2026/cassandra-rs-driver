@@ -1,3 +1,4 @@
-08:21:15 [WARN] Single type
-08:21:15 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_INT
-08:21:15 [INFO] 13
+09:44:19 [DEBUG] cassandra_lib_myself: type => CASS_VALUE_TYPE_INT
+09:44:19 [WARN] Single type
+09:44:19 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_INT
+09:44:19 [INFO] 10

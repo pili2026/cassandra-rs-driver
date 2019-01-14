@@ -43,6 +43,8 @@ fn select_condition(session: &mut CassSession, condition: &str, keyspace: &str ,
                     let value = cass_row_get_column(row, 0);
                     let items_iterator = cass_iterator_from_collection(value);
 
+                    debug!("type => {:?}", cass_value_type(value));
+
                     if items_iterator.is_null() {
                         warn!("Single type");
                         print_value(value);
@@ -88,7 +90,12 @@ fn select_from_collection(items_iterator : *mut CassIterator) {
 
                     }
                 }
-                _ => print_value(items_value),
+                _ => {
+                    match cass_value_is_null(items_value) {
+                        cass_false => print_value(items_value),
+                        cass_true => error!("null"),
+                    }
+                }
             }
         }
     }
@@ -175,7 +182,7 @@ unsafe fn print_value(items_number_value : *const CassValue_) {
                 _ => error!("Error"),
             }
         }
-        cass_true => print!("<null> "),
+        cass_true => error!("<null>"),
     }
 }
 
@@ -203,7 +210,7 @@ fn main() {
             }
         }
 
-        select_condition(session, "title", "test_ks", "user", "first_name", "Paul").unwrap();
+        select_condition(session, "title", "test_ks", "user", "first_name", "Joe").unwrap();
 
         let close_future = cass_session_close(session);
         cass_future_wait(close_future);
@@ -212,7 +219,7 @@ fn main() {
         cass_cluster_free(cluster);
         cass_session_free(session);
 
-//        cass_uuid_gen_free(uuid_gen);
+        cass_uuid_gen_free(uuid_gen);
 
     }
 }
