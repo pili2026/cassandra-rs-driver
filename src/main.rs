@@ -22,8 +22,7 @@ use std::fs::File;
 const CASS_UUID_STRING_LENGTH: usize = 37;
 static mut VAR: u128 = 0;
 
-
-fn select_from_list_udt(session: &mut CassSession, condition: &str, keyspace: &str ,table_name: &str, primary_key: &'static str, column_value: &str) -> Result<(), CassError> {
+fn select_condition(session: &mut CassSession, condition: &str, keyspace: &str ,table_name: &str, primary_key: &'static str, column_value: &str) -> Result<(), CassError> {
     unsafe {
         let query = format!("SELECT {condition} FROM {keyspace}.{table_name} WHERE {primary_key} = ?;",
                             condition=condition, keyspace=keyspace, table_name=table_name , primary_key=primary_key);
@@ -44,111 +43,18 @@ fn select_from_list_udt(session: &mut CassSession, condition: &str, keyspace: &s
                     let value = cass_row_get_column(row, 0);
                     let items_iterator = cass_iterator_from_collection(value);
 
-                    while cass_iterator_next(items_iterator) == cass_true {
-                        let items_value = cass_iterator_get_value(items_iterator);
-                        let items_field = cass_iterator_fields_from_user_type(items_value);
+                    if items_iterator.is_null() {
+                        warn!("type is different");
 
-                        assert_eq!(cass_value_type(items_value), CASS_VALUE_TYPE_UDT);
-                        while cass_iterator_next(items_field) == cass_true{
-
-                            let mut item = mem::zeroed();
-                            let mut item_length = mem::zeroed();
-
-                            let items_number_value = cass_iterator_get_user_type_field_value(items_field);
-
-                            cass_iterator_get_user_type_field_name(items_field, &mut item, &mut item_length);
-                            warn!("UDT Name: {:?}", raw2utf8(item, item_length));
-
-                            match cass_value_is_null(items_number_value) {
-                                cass_false => {
-                                    match cass_value_type(items_number_value) {
-                                        CASS_VALUE_TYPE_TEXT |
-                                        CASS_VALUE_TYPE_ASCII |
-                                        CASS_VALUE_TYPE_VARCHAR => {
-                                            let mut text = mem::zeroed();
-                                            let mut text_length = mem::zeroed();
-                                            cass_value_get_string(items_number_value, &mut text, &mut text_length);
-                                            debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                                            info!("\"{:?}\" ", raw2utf8(text, text_length));
-                                        }
-                                        CASS_VALUE_TYPE_VARINT => {
-                                            let mut var = mem::zeroed();
-                                            let mut var_length = mem::zeroed();
-
-                                            cass_value_get_bytes(items_number_value, &mut var, &mut var_length);
-
-                                            let mut slice = slice::from_raw_parts(var, var_length);
-                                            debug!("Value Type => {:?}", cass_value_type(items_number_value));
-
-                                            VAR = 0;
-                                            for slice_number in 0..var_length {
-                                                let i = var_length - slice_number- 1;
-                                                let hex_pow = 256u128.pow(i as u32);
-                                                let result = slice[slice_number] as u128 * hex_pow;
-                                                VAR += result;
-                                            }
-                                            info!("{:?}", VAR);
-                                        }
-                                        CASS_VALUE_TYPE_BIGINT => {
-                                            let mut i = mem::zeroed();
-                                            cass_value_get_int64(items_number_value, &mut i);
-                                            debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                                            info!("{:?} ", i);
-                                        }
-                                        CASS_VALUE_TYPE_INT => {
-                                            let mut i = mem::zeroed();
-                                            cass_value_get_int32(items_number_value, &mut i);
-                                            debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                                            info!("{:?}", i);
-                                        }
-                                        CASS_VALUE_TYPE_TIMESTAMP => {
-                                            let mut t = mem::zeroed();
-                                            cass_value_get_int64(items_number_value, &mut t);
-                                            debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                                            info!("{:?}", t);
-                                        }
-                                        CASS_VALUE_TYPE_BOOLEAN => {
-                                            let mut b: cass_bool_t = mem::zeroed();
-                                            cass_value_get_bool(items_number_value, &mut b);
-                                            debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                                            info!("{:?}",
-                                                     match b {
-                                                         cass_true => "true",
-                                                         cass_false => "false",
-                                                     });
-                                        }
-                                        CASS_VALUE_TYPE_UUID => {
-                                            let mut u: CassUuid = mem::zeroed();
-                                            let mut us: [i8; CASS_UUID_STRING_LENGTH] = mem::zeroed();
-
-                                            cass_value_get_uuid(items_number_value, &mut u);
-                                            cass_uuid_string(u, &mut *us.as_mut_ptr());
-
-                                            debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                                            info!("{:?}", "us - FIXME" /* us */);
-                                        }
-                                        CASS_VALUE_TYPE_INET => {
-                                            let mut inet = mem::zeroed();
-                                            debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                                            cass_value_get_inet(items_number_value, &mut inet);
-                                            let mut vec = inet.address.to_vec();
-                                            vec.truncate(inet.address_length as usize);
-                                            info!("{:?}", vec);
-
-                                        }
-                                        _ => error!("Error"),
-                                    }
-                                }
-                                cass_true => print!("<null> "),
-                            }
-                        }
+                    } else {
+                        select_from_list_udt(items_iterator);
 
                     }
                     cass_iterator_free(items_iterator);
+
                 };
                 cass_iterator_free(iterator);
                 cass_result_free(result);
-
             }
             _ => print_error(future),
         }
@@ -157,6 +63,113 @@ fn select_from_list_udt(session: &mut CassSession, condition: &str, keyspace: &s
         cass_statement_free(statement);
 
         Ok(())
+    }
+}
+
+fn select_from_list_udt(items_iterator : *mut CassIterator) {
+    unsafe {
+        while cass_iterator_next(items_iterator) == cass_true {
+            let items_value = cass_iterator_get_value(items_iterator);
+            let items_field = cass_iterator_fields_from_user_type(items_value);
+
+            assert_eq!(cass_value_type(items_value), CASS_VALUE_TYPE_UDT);
+            while cass_iterator_next(items_field) == cass_true{
+
+                let mut item = mem::zeroed();
+                let mut item_length = mem::zeroed();
+                let items_number_value = cass_iterator_get_user_type_field_value(items_field);
+
+                cass_iterator_get_user_type_field_name(items_field, &mut item, &mut item_length);
+                warn!("UDT Name: {:?}", raw2utf8(item, item_length));
+                print_schema_value(items_number_value);
+
+            }
+        }
+    }
+}
+
+unsafe fn print_schema_value(items_number_value : *const CassValue_) {
+    match cass_value_is_null(items_number_value) {
+        cass_false => {
+            match cass_value_type(items_number_value) {
+                CASS_VALUE_TYPE_TEXT |
+                CASS_VALUE_TYPE_ASCII |
+                CASS_VALUE_TYPE_VARCHAR => {
+                    let mut text = mem::zeroed();
+                    let mut text_length = mem::zeroed();
+                    cass_value_get_string(items_number_value, &mut text, &mut text_length);
+                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
+                    info!("\"{:?}\" ", raw2utf8(text, text_length));
+                }
+                CASS_VALUE_TYPE_VARINT => {
+                    let mut var = mem::zeroed();
+                    let mut var_length = mem::zeroed();
+
+                    cass_value_get_bytes(items_number_value, &mut var, &mut var_length);
+
+                    let mut slice = slice::from_raw_parts(var, var_length);
+                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
+
+                    VAR = 0;
+                    for slice_number in 0..var_length {
+                        let i = var_length - slice_number- 1;
+                        let hex_pow = 256u128.pow(i as u32);
+                        let result = slice[slice_number] as u128 * hex_pow;
+                        VAR += result;
+                    }
+                    info!("{:?}", VAR);
+                }
+                CASS_VALUE_TYPE_BIGINT => {
+                    let mut i = mem::zeroed();
+                    cass_value_get_int64(items_number_value, &mut i);
+                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
+                    info!("{:?} ", i);
+                }
+                CASS_VALUE_TYPE_INT => {
+                    let mut i = mem::zeroed();
+                    cass_value_get_int32(items_number_value, &mut i);
+                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
+                    info!("{:?}", i);
+                }
+                CASS_VALUE_TYPE_TIMESTAMP => {
+                    let mut t = mem::zeroed();
+                    cass_value_get_int64(items_number_value, &mut t);
+                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
+                    info!("{:?}", t);
+                }
+                CASS_VALUE_TYPE_BOOLEAN => {
+                    let mut b: cass_bool_t = mem::zeroed();
+                    cass_value_get_bool(items_number_value, &mut b);
+                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
+                    info!("{:?}",
+                          match b {
+                              cass_true => "true",
+                              cass_false => "false",
+                          });
+                }
+                CASS_VALUE_TYPE_UUID => {
+                    let mut u: CassUuid = mem::zeroed();
+                    let mut us: [i8; CASS_UUID_STRING_LENGTH] = mem::zeroed();
+
+                    cass_value_get_uuid(items_number_value, &mut u);
+                    cass_uuid_string(u, &mut *us.as_mut_ptr());
+
+                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
+                    info!("{:?}", "us - FIXME" /* us */);
+                }
+                CASS_VALUE_TYPE_INET => {
+                    let mut inet = mem::zeroed();
+                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
+                    cass_value_get_inet(items_number_value, &mut inet);
+                    let mut vec = inet.address.to_vec();
+                    vec.truncate(inet.address_length as usize);
+                    info!("{:?}", vec);
+
+                }
+                _ => error!("Error"),
+            }
+        }
+        cass_true => print!("<null> "),
     }
 }
 
@@ -184,7 +197,7 @@ fn main() {
             }
         }
 
-        select_from_list_udt(session, "new_entry", "examples", "new_user", "deviceid", "Paul").unwrap();
+        select_condition(session, "new_entry", "examples", "new_user", "deviceid", "Jeremy").unwrap();
 
         let close_future = cass_session_close(session);
         cass_future_wait(close_future);

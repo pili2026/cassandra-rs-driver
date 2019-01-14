@@ -1,15 +1,15 @@
-10:01:30 [WARN] UDT Name: Ok("zip")
-10:01:30 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_VARINT
-10:01:30 [INFO] 99
-10:01:30 [WARN] UDT Name: Ok("address")
-10:01:30 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_ASCII
-10:01:30 [INFO] "Ok("qdff-35fds")" 
-10:01:30 [WARN] UDT Name: Ok("mac")
-10:01:30 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_INET
-10:01:30 [INFO] [220, 168, 9, 1]
-10:01:30 [WARN] UDT Name: Ok("epoch")
-10:01:30 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_TIMESTAMP
-10:01:30 [INFO] 123456789
-10:01:30 [WARN] UDT Name: Ok("new")
-10:01:30 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_BOOLEAN
-10:01:30 [INFO] "true"
+03:33:42 [WARN] UDT Name: Ok("zip")
+03:33:42 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_VARINT
+03:33:42 [INFO] 9999
+03:33:42 [WARN] UDT Name: Ok("address")
+03:33:42 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_ASCII
+03:33:42 [INFO] "Ok("qdff-35fds")" 
+03:33:42 [WARN] UDT Name: Ok("mac")
+03:33:42 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_INET
+03:33:42 [INFO] [192, 168, 9, 1]
+03:33:42 [WARN] UDT Name: Ok("epoch")
+03:33:42 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_TIMESTAMP
+03:33:42 [INFO] 1234
+03:33:42 [WARN] UDT Name: Ok("new")
+03:33:42 [DEBUG] cassandra_lib_myself: Value Type => CASS_VALUE_TYPE_BOOLEAN
+03:33:42 [INFO] "true"
