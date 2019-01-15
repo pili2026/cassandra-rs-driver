@@ -43,8 +43,6 @@ fn select_condition(session: &mut CassSession, condition: &str, keyspace: &str ,
                     let value = cass_row_get_column(row, 0);
                     let items_iterator = cass_iterator_from_collection(value);
 
-                    debug!("type => {:?}", cass_value_type(value));
-
                     if items_iterator.is_null() {
                         warn!("Single type");
                         print_value(value);
