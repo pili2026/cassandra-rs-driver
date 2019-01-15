@@ -1,12 +1,17 @@
 #![allow(dead_code)]
 extern crate cassandra_cpp_sys;
+extern crate iron;
+extern crate rand;
+extern crate router;
 
 #[macro_use]
 extern crate log;
 extern crate simplelog;
 
-extern crate bytes;
-extern crate hex;
+#[macro_use]
+extern crate serde_derive;
+extern crate serde;
+extern crate serde_json;
 
 mod examples_util;
 use examples_util::*;
