@@ -1,305 +1,613 @@
 #![allow(unused)]
 extern crate cassandra_cpp_sys;
-extern crate iron;
-extern crate rand;
-extern crate router;
+extern crate actix;
+extern crate actix_web;
 
-#[macro_use]
-extern crate log;
+#[macro_use] extern crate log;
 extern crate simplelog;
 
 #[macro_use]
 extern crate serde_derive;
 extern crate serde;
 extern crate serde_json;
+extern crate serde_yaml;
+extern crate chrono;
+extern crate math;
+extern crate time;
 
-mod examples_util;
-use crate::examples_util::*;
-
-use std::ffi::CString;
-use std::mem;
-use cassandra_cpp_sys::*;
-
-use std::collections::LinkedList;
-use std::str;
-use std::slice;
+mod connect_util;
+mod schema_util;
+use crate::connect_util::*;
+use crate::schema_util::*;
+use std::collections::HashMap;
 use simplelog::*;
+use cassandra_cpp_sys::*;
+use std::slice;
+use std::mem;
 use std::fs::File;
-use std::io::Read;
+use std::fs;
+use std::ffi::CString;
+use std::collections::LinkedList;
+use std::str::Utf8Error;
+use std::ffi::CStr;
+use std::str;
+use std::str::FromStr;
+use std::env;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
-use iron::prelude::*;
-use iron::status;
-use iron::mime::Mime;
-use rand::Rng;
-use router::Router;
 use serde::*;
 use serde::{Deserialize, Serialize};
-use serde_json::{Result, Value};
-use std::str::Utf8Error;
+use serde_json::{Value, Map, Number, to_value};
+use serde_json::json;
+use log::Level;
+use log::LevelFilter;
+use time::Duration;
+use chrono::prelude::*;
+use math::round;
+use actix_web::{
+    error, http, middleware, server, App, AsyncResponder, Error, HttpMessage,
+    HttpRequest, HttpResponse, Json, Responder,Path,
+    Result,
+};
+use futures::future::{result, FutureResult};
+use futures::{Future, Stream};
+use futures::sync::mpsc;
+use actix_web::http::{header, Method, StatusCode,};
+use bytes::Bytes;
+use futures::sink::Sink;
+use actix_web::server::HttpServer;
+use actix_web::http::header::ContentEncoding;
+
+use std::thread;
+use std::ptr::null;
+use std::os::raw::c_char;
+use std::io::prelude::*;
+
+#[derive(Deserialize)]
+struct Url {
+    deviceid: String,
+    epoch: String,
+    feature: String,
+}
 
 const CASS_UUID_STRING_LENGTH: usize = 37;
+const CASS_INET_STRING_LENGTH: usize = 46;
 
-fn select_condition(session: &mut CassSession, condition: &str, keyspace: &str ,table_name: &str, primary_key: &'static str, column_value: &str) -> String {
+unsafe fn cassandra_use(session: &mut CassSession, primary_key: &str, co_primary_key: &str, feature_name: &str) -> HashMap<String, Value> {
 
-    let mut dl = LinkedList::new();
+    let feature = feature_replace(feature_name);
 
-    unsafe {
-        let query = format!("SELECT {condition} FROM {keyspace}.{table_name} WHERE {primary_key} = ?;",
-                            condition=condition, keyspace=keyspace, table_name=table_name , primary_key=primary_key);
-        let statement = cass_statement_new(CString::new(query).unwrap().as_ptr(), 1);
-        let mut column = schema_meta(session, keyspace, table_name);
+    let mut status_map = HashMap::new();
+//    let mut status_map = serde_json::Map::new();
+    let mut result_link = Vec::new();
+    let mut status_link = Vec::new();
 
-//        let mut u: CassUuid = mem::zeroed();
-//        let mut us: [i8; CASS_UUID_STRING_LENGTH] = mem::zeroed();
-//        cass_uuid_from_string(CString::new(column_value).unwrap().as_ptr(), &mut u);
-//        cass_uuid_string(u, &mut *us.as_mut_ptr());
-//
-//        println!("{:?}", raw2utf8(u, *us.as_mut_ptr()));
+    // If status_bool is true, status_result is null
+    let (status_result, status_bool) = time_status(co_primary_key);
 
-        cass_statement_bind_string(statement, 0, CString::new(column_value).unwrap().as_ptr());
+    let (start, end, status) = split_once(co_primary_key);
 
-        let future = &mut *cass_session_execute(session, statement);
-        cass_future_wait(future);
+    let start_timestamp = start.parse::<i64>().unwrap();
+    let end_timestamp = end.parse::<i64>().unwrap();
+
+    //Calculate the time interval passed in and cut. Returns the vec of day, start_time, and end_time.
+    let (date, start_time, end_time) = get_time_slices( start_timestamp, end_timestamp);
+
+    for (day, (start,end)) in date.iter().zip(start_time.iter().zip(end_time)) {
+        let (cass_data, cass_status) = cassandra_connect(session, primary_key, &day, &feature, &start, &end);
+
+        if cass_status.contains("ok") {
+            result_link.extend(cass_data);
+        } else {
+            status_link.push(cass_status);
+        }
+    }
+
+    if status_link.contains(&"unknown feature".to_string()) {
+        error!("unknown feature");
+        let data_to_json = to_value(result_link).expect("data type was vec");
+        status_map.insert("msg".to_string(), Value::String("unknown feature".to_string()));
+        status_map.insert("result".to_string(), Value::String("unknown feature".to_string()));
+        status_map.insert("data".to_string(), data_to_json);
+        return status_map
+    } else if result_link.len() == 0 {
+        let data_to_json = to_value(result_link).expect("data type was vec");
+        status_map.insert("msg".to_string(), Value::String("ok".to_string()));
+        status_map.insert("result".to_string(), Value::String("ok".to_string()));
+        status_map.insert("data".to_string(), data_to_json);
+        return status_map
+    }
+
+    let data_to_json = to_value(result_link).expect("data type was vec");
+    status_map.insert("msg".to_string(), Value::String("ok".to_string()));
+    status_map.insert("result".to_string(), Value::String("ok".to_string()));
+    status_map.insert("data".to_string(), data_to_json);
+    status_map
+
+}
+
+//return type is LinkedList
+unsafe fn cassandra_connect(session: &mut CassSession, primary_key: &str, co_primary_key: &str, feature_name: &str, start_day: &str, end_day: &str)
+    -> (Vec<HashMap<&'static str, Value>>, String) {
+
+    let mut has_more_pages = true;
+    let table_name = feature_to_table(feature_name);
+    let table_bool = table_schema(session, "*", "nebula_device_data", table_name.as_str());
+
+    //LinkedList,collect data for each query.
+    let mut value_list = Vec::new();
+
+    if table_bool == false {
+        return (value_list, "unknown feature".to_string())
+    }
+
+    let query_check = table_check(feature_name, primary_key, co_primary_key, start_day, end_day);
+
+    let statement = cass_statement_new(CString::new(query_check).unwrap().as_ptr(), 0);
+    cass_statement_set_paging_size(statement, 100);
+
+    while has_more_pages {
+        let future = cass_session_execute(session, statement);
 
         match cass_future_error_code(future) {
             CASS_OK => {
                 let result = cass_future_get_result(future);
                 let iterator = cass_iterator_from_result(result);
+                //looking for the value of column.The type of the return is Vec<String>
+                let mut column = column_schema(session, "*", "nebula_device_data", table_name.as_str());
+                cass_future_free(future);
 
-                if cass_iterator_next(iterator) == cass_true {
+                while cass_iterator_next(iterator) == cass_true {
+                    //Gets the row at the result iterator's current position(type is memory address).
                     let row = cass_iterator_get_row(iterator);
-                    let value = cass_row_get_column(row, 1);
-                    let items_iterator = cass_iterator_from_collection(value);
 
-                    if items_iterator.is_null() {
-                        warn!("Single type");
-                        parse_value(value);
-                        let return_value = parse_value(value);
-                        println!("return =>{:?}", return_value);
-                        dl.push_back(return_value);
-                        info!("value: {:?}", dl);
-//                        return dl
-                    } else {
-                        warn!("Collection type");
-                        let mut udt_return = select_from_collection(items_iterator);
-                        info!("list udt value: {:?}", udt_return);
-                        return udt_return
+                    //HashMap expected type is HashMap<Column, Data>
+                    let mut map= HashMap::new();
+                    let mut json_value = Value::Null;
 
-                    };
-                    cass_iterator_free(items_iterator);
-                };
+                    for column_index in 0..column.len() {
+                        //Get the column value at index for the specified row(type is memory address).
+                        let value = cass_row_get_column(row, column_index);
+                        //(type is memory address).
+                        let items_iterator = cass_iterator_from_collection(value);
+
+                        if items_iterator.is_null() {
+                            //parse the memory address and generate a value based on the type(convert to json value).
+                            json_value = parse_value(value);
+
+                        } else {
+                            //if the type belongs to collection(udt), parse the memory address(convert to json value).
+                            json_value = json!(query_from_collection(items_iterator));
+
+                        }
+                        map.insert(column[column_index], json_value);
+                    }
+                    value_list.push(map);
+                }
+                match cass_result_has_more_pages(result) == cass_true {
+                    true => {
+                        cass_statement_set_paging_state(statement, result);
+                    }
+                    false => has_more_pages = false,
+                }
                 cass_iterator_free(iterator);
                 cass_result_free(result);
-            }
-            _ => print_error(future),
-        }
 
-        cass_future_free(future);
-        cass_statement_free(statement);
+            }
+            _ => print_error(&mut *future)
+        }
     }
-    "Ok".to_string()
+    cass_statement_free(statement);
+    (value_list, "ok".to_string())
+
 }
 
-unsafe fn select_from_collection(items_iterator : *mut CassIterator) -> String {
+unsafe fn query_from_collection(items_iterator : *mut CassIterator) -> Vec<Map<String, Value>> {
 
-    let mut udt_value = Vec::new();
-    let mut udt_name_type = Vec::new();
-    let mut combine = Vec::new();
+    let mut list_udt = Vec::new();
 
-    while cass_iterator_next(items_iterator) == cass_true {
+    while  cass_iterator_next(items_iterator) == cass_true {
         let items_value = cass_iterator_get_value(items_iterator);
+        let udt_result = query_collection(items_value);
+        list_udt.push(udt_result)
+    }
+    cass_iterator_free(items_iterator);
+    list_udt
 
-        match cass_value_type(items_value) {
-            CASS_VALUE_TYPE_UDT => {
-                let items_field = cass_iterator_fields_from_user_type(items_value);
-                while cass_iterator_next(items_field) == cass_true{
+}
 
-                    let mut item = mem::zeroed();
-                    let mut item_length = mem::zeroed();
-                    let items_number_value = cass_iterator_get_user_type_field_value(items_field);
+unsafe fn query_collection(items_value: *const CassValue) -> Map<String, Value> {
 
-                    cass_iterator_get_user_type_field_name(items_field, &mut item, &mut item_length);
-                    let udt_name = raw2utf8(item, item_length).unwrap();
-                    warn!("UDT Name: {:?}", udt_name);
-                    let return_value = parse_value(items_number_value);
-                    println!("return =>{:?}", return_value);
-                    udt_name_type.push(udt_name);
-                    udt_value.push(return_value);
+//    let mut map_udt = HashMap::new();
+    let mut map_udt = serde_json::Map::new();
 
-                    println!("udt_name_type => {:?}", udt_name_type);
-                }
+    match cass_value_type(items_value) {
+        CASS_VALUE_TYPE_UDT => {
+            let items_field = cass_iterator_fields_from_user_type(items_value);
 
-                for i in 0..udt_name_type.len() {
-                    let tem = format!("{:?}:{:?}", udt_name_type[i], udt_value[i]);
-                    combine.push(tem);
-                }
-                let combine_value =  combine.join(",");
-                let combine_value_f = "{".to_string() + &combine_value+ &"}".to_string();
-                println!("{:?}", combine_value_f);
-                return combine_value_f
+            while cass_iterator_next(items_field) == cass_true {
 
+                let mut item = mem::zeroed();
+                let mut item_length = mem::zeroed();
+                let items_number_value = cass_iterator_get_user_type_field_value(items_field);
+
+                cass_iterator_get_user_type_field_name(items_field, &mut item, &mut item_length);
+                let udt_name = raw2utf8(item, item_length).unwrap();
+                let parse_value = parse_value(items_number_value);
+                map_udt.insert(udt_name, parse_value);
             }
-            _ => {
-                match cass_value_is_null(items_value) {
-                    cass_false => {
-                        parse_value(items_value);
-                        let return_value = parse_value(items_value);
-                        println!("return =>{:?}", return_value);
-                        udt_value.push(return_value);
-                        info!("value: {:?}", udt_value);
-                    },
-                    cass_true => error!("null"),
-                }
+
+        }
+        _ => {
+            match cass_value_is_null(items_value) {
+                cass_false => {
+                    parse_value(items_value);
+                    let parse_value = parse_value(items_value);
+                },
+                cass_true => error!("null"),
             }
         }
     }
-
-    "Ok".to_string()
+    map_udt
 }
 
-unsafe fn schema_meta(session: &mut CassSession, keyspace: &str ,table_name: &str) ->Vec<String> {
-    let mut list = Vec::new();
-    let schema_meta = cass_session_get_schema_meta(session);
-    let keyspace_meta = cass_schema_meta_keyspace_by_name(schema_meta, CString::new(keyspace).unwrap().as_ptr());
-    let table_meta = cass_keyspace_meta_table_by_name(keyspace_meta, CString::new(table_name).unwrap().as_ptr());
-    let iterator = cass_iterator_columns_from_table_meta(table_meta);
+unsafe fn parse_value(items_number_value : *const CassValue_) -> Value {
 
-    while cass_iterator_next(iterator) == cass_true {
-        let column_meta = cass_iterator_get_column_meta(iterator);
+    match cass_value_type(items_number_value) {
+        CASS_VALUE_TYPE_TEXT |
+        CASS_VALUE_TYPE_ASCII |
+        CASS_VALUE_TYPE_VARCHAR => {
+            let mut text = mem::zeroed();
+            let mut text_length = mem::zeroed();
+            cass_value_get_string(items_number_value, &mut text, &mut text_length);
+            let utf8_result = raw2utf8(text, text_length).unwrap();
 
-        let mut name = mem::zeroed();
-        let mut name_length = mem::zeroed();
+            if utf8_result.len() == 0 {
+                return Value::Null
+            } else {
+                return Value::String(utf8_result)
+            }
 
-        cass_column_meta_name(column_meta, &mut name, &mut name_length);
-        let meta_name = raw2utf8(name, name_length).unwrap();
-        info!("Column \"{}\":", meta_name);
-        list.push(meta_name);
-    }
-
-    cass_iterator_free(iterator);
-    list
-}
-
-unsafe fn parse_value(items_number_value : *const CassValue_) -> String{
-
-    match cass_value_is_null(items_number_value) {
-        cass_false => {
-            match cass_value_type(items_number_value) {
-                CASS_VALUE_TYPE_TEXT |
-                CASS_VALUE_TYPE_ASCII |
-                CASS_VALUE_TYPE_VARCHAR => {
-                    let mut text = mem::zeroed();
-                    let mut text_length = mem::zeroed();
-                    cass_value_get_string(items_number_value, &mut text, &mut text_length);
-                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                    let utf8_result = raw2utf8(text, text_length).unwrap();
-                    info!("\"{:?}\" ", utf8_result);
-
-                    return utf8_result
-                }
-                CASS_VALUE_TYPE_VARINT => {
-                    let mut var = mem::zeroed();
-                    let mut var_length = mem::zeroed();
-
-                    cass_value_get_bytes(items_number_value, &mut var, &mut var_length);
-
-                    let mut slice = slice::from_raw_parts(var, var_length);
-                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
-
-                    let mut counter: u128 = 0;
-                    for slice_number in 0..var_length {
-                        let i = var_length - slice_number- 1;
-                        let hex_pow = 256u128.pow(i as u32);
-                        let result = slice[slice_number] as u128 * hex_pow;
-                        counter += result;
-                    }
-                    info!("{:?}", counter);
-
-                    let counter_str = format!("{}", counter);
-                    return counter_str
-                }
-                CASS_VALUE_TYPE_BIGINT => {
-                    let mut i = mem::zeroed();
-                    cass_value_get_int64(items_number_value, &mut i);
-                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                    info!("{:?} ", i);
-
-                    let bigint_str = format!("{}", i);
-                    return bigint_str
-                }
-                CASS_VALUE_TYPE_INT => {
-                    let mut i = mem::zeroed();
-                    cass_value_get_int32(items_number_value, &mut i);
-                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                    info!("{:?}", i);
-
-                    let int_str = format!("{}", i);
-                    return int_str
-                }
-                CASS_VALUE_TYPE_TIMESTAMP => {
-                    let mut t = mem::zeroed();
-                    cass_value_get_int64(items_number_value, &mut t);
-                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                    info!("{:?}", t);
-
-                    let time_str = format!("{}", t);
-                    return time_str
-                }
-                CASS_VALUE_TYPE_BOOLEAN => {
-                    let mut b: cass_bool_t = mem::zeroed();
-                    cass_value_get_bool(items_number_value, &mut b);
-                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                    info!("{:?}",
-                          match b {
-                              cass_true => return "true".to_string(),
-                              cass_false => return "false".to_string(),
-                          });
-
-                }
-                CASS_VALUE_TYPE_UUID => {
-                    let mut u: CassUuid = mem::zeroed();
-                    let mut us: [i8; CASS_UUID_STRING_LENGTH] = mem::zeroed();
-                    cass_value_get_uuid(items_number_value, &mut u);
-
-                    cass_uuid_string(u, &mut *us.as_mut_ptr());
-
-
-                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                    info!("{:?}", "us - FIXME" /* us */);
-                    println!("{:?}", *us.as_mut_ptr());//
-                }
-                CASS_VALUE_TYPE_INET => {
-                    let mut inet = mem::zeroed();
-                    debug!("Value Type => {:?}", cass_value_type(items_number_value));
-                    cass_value_get_inet(items_number_value, &mut inet);
-                    let mut vec = inet.address.to_vec();
-                    vec.truncate(inet.address_length as usize);
-
-                    let mut vec_str= Vec::new();
-                    for num in vec {
-                        let num_str = format!("{:?}", num);
-                        vec_str.push(num_str);
-
-                    }
-                    let ipaddr = vec_str.join(".");
-                    info!("{:?}", ipaddr);
-
-                    return ipaddr
-
-                }
-                _ => error!("No match type: {:?}", cass_value_type(items_number_value))
-            };
         }
-        cass_true => error!("<null>"),
+        CASS_VALUE_TYPE_VARINT => {
+            let mut var = mem::zeroed();
+            let mut var_length = mem::zeroed();
+
+            cass_value_get_bytes(items_number_value, &mut var, &mut var_length);
+
+            let mut slice = slice::from_raw_parts(var, var_length);
+            let mut counter: i128 = 0;
+            for slice_number in 0..var_length {
+                let i = var_length - slice_number- 1;
+                let pow = 256i128.pow(i as u32);
+                let result = slice[slice_number] as i128 * pow;
+                counter += result;
+            }
+            let val = Value::Number(counter.into());
+            return val
+        }
+        CASS_VALUE_TYPE_BIGINT => {
+            let mut b: i64 = 0;
+            cass_value_get_int64(items_number_value, &mut b);
+            let val = Value::Number(b.into());
+            return val
+        }
+        CASS_VALUE_TYPE_INT => {
+            let mut i: i32 = 0;
+            cass_value_get_int32(items_number_value, &mut i);
+            let val = Value::Number(i.into());
+            return val
+        }
+        CASS_VALUE_TYPE_TIMESTAMP => {
+            let mut t: i64 = 0;
+            cass_value_get_int64(items_number_value, &mut t);
+            let val = Value::Number(t.into());
+            return val
+        }
+        CASS_VALUE_TYPE_BOOLEAN => {
+            let mut b: cass_bool_t = mem::zeroed();
+            cass_value_get_bool(items_number_value, &mut b);
+            match b {
+                cass_true => return Value::Bool(true),
+                cass_false => return Value::Bool(false),
+            }
+        }
+        CASS_VALUE_TYPE_UUID | CASS_VALUE_TYPE_TIMEUUID => {
+            let mut u: CassUuid = mem::zeroed();
+            cass_value_get_uuid(items_number_value, &mut u);
+            let mut buf: Vec<c_char> = Vec::with_capacity(CASS_UUID_STRING_LENGTH);
+            cass_uuid_string(u, buf.as_mut_ptr());
+            let new_buf: String = CStr::from_ptr(buf.as_mut_ptr()).to_str().unwrap().into();
+            return Value::String(new_buf)
+        }
+        CASS_VALUE_TYPE_INET => {
+            let mut inet: CassInet = mem::zeroed();
+            cass_value_get_inet(items_number_value, &mut inet);
+            let mut buf: Vec<c_char> = Vec::with_capacity(CASS_INET_STRING_LENGTH);
+            cass_inet_string(inet, buf.as_mut_ptr());
+            let new_buf: String = CStr::from_ptr(buf.as_mut_ptr()).to_str().unwrap().into();
+            return Value::String(new_buf)
+        }
+        CASS_VALUE_TYPE_LIST => {
+            let mut list = Vec::new();
+            let items_field = cass_iterator_from_collection(items_number_value);
+            while cass_iterator_next(items_field) == cass_true {
+
+                let items_number_value = cass_iterator_get_value(items_field);
+                let parse_value = parse_value(items_number_value);
+                list.push(parse_value);
+            }
+            cass_iterator_free(items_field);
+            return Value::Array(list)
+        }
+        _ => return Value::Null
     }
-    return "OK".to_string()
 }
 
-unsafe fn cass_connect() -> LinkedList<String> {
+//This function handles time-related status messages
+fn time_status(co_primary_key: &str) -> (HashMap<&str, Value>, bool) {
+
+    let mut status_link = Vec::new();
+
+    let mut status_map = HashMap::new();
+
+    let (start_time, end_time, status) = split_once(co_primary_key);
+
+    if status.contains("time range should be integer!" ) {
+        error!("{:?}", status);
+        status_map.insert("msg", Value::String("time range should be integer!".to_string()));
+        status_map.insert("result", Value::String("failed".to_string()));
+        status_map.insert("data", Value::Array(status_link));
+        return (status_map, false)
+    } else if status.contains("Wrong time period, over one years") {
+        let start_period = start_time.parse::<i64>().unwrap();
+        let end_period = end_time.parse::<i64>().unwrap();
+        let status_format = format!("Wrong time period, over one years - start: {:?}, end: {:?}", start_period, end_period);
+        error!("{:?}", status);
+        status_map.insert("msg", Value::String(status_format));
+        status_map.insert("result", Value::String("failed".to_string()));
+        status_map.insert("data", Value::Array(status_link));
+        return (status_map, false)
+    } else if status.contains("Wrong time period") {
+        let start_period = start_time.parse::<i64>().unwrap();
+        let end_period = end_time.parse::<i64>().unwrap();
+        let status_format = format!("Wrong time period - start: {:?}, end: {:?}", start_period, end_period);
+        error!("{:?}", status_format);
+        status_map.insert("msg", Value::String(status_format));
+        status_map.insert("result", Value::String("failed".to_string()));
+        status_map.insert("data", Value::Array(status_link));
+        return (status_map, false)
+    }
+
+    (status_map, true)
+}
+
+//Change the feature name obtained by url to the table name of cassandra
+fn feature_to_table(feature_name: &str) -> String{
+    //Use uuid as the primary key table
+    let mut converted_with_uuid_table = vec!["periodical_application_usage_per_ip", "sta_mgnt", "log_mgnt",
+                                             "periodical_cf-statistics_per_ip", "periodical_anti_virus_statistics_per_ip"];
+
+    let mut check_bool = false;
+    //Confirm that the query table conforms to the converted with date table.
+    //If it matches, return the boolean value true.
+    for table in converted_with_uuid_table.iter() {
+
+        if &feature_name == table {
+            check_bool = true;
+        }
+    }
+
+    if check_bool == true {
+        //Change the feature name obtained by url to the table name of cassandra
+        let table_name = "t_".to_owned() + feature_name + "_date";
+        return  table_name
+
+    } else  {
+        let table_name = "t_".to_owned() + feature_name ;
+        return  table_name
+    }
+}
+
+//Cut the received epoch range
+fn split_once(in_string: &str) -> (String, String, &str) {
+
+    let check = in_string.contains("-");
+
+    if check {
+        let mut splitter = in_string.splitn(2, '-');
+        let first = splitter.next().unwrap();
+        let second = splitter.next().unwrap();
+
+        let first_bool = first.parse::<i64>().is_ok();
+        let second_bool = second.parse::<i64>().is_ok();
+
+        if first_bool == false || second_bool == false {
+            return ("false".to_string(), "false".to_string(), "time range should be integer!")
+        }
+
+        let (period_check, status) = _time_range_check(&first, &second);
+
+        if period_check == true {
+            let s_epoch = _epoch_alignment(first);
+            let e_epoch = _epoch_alignment(second);
+            return (s_epoch, e_epoch, "Ok")
+
+        } else if status.contains("time range should be integer!" ) {
+            return (first.to_string(), second.to_string(), "time range should be integer!")
+
+        } else if  status.contains("Wrong time period, over one years" ) {
+            return (first.to_string(), second.to_string(), "Wrong time period, over one years")
+
+        } else {
+            return (first.to_string(), second.to_string(), "Wrong time period")
+        }
+    } else {
+        error!("Wrong time period");
+        return (in_string.to_string(), "Wrong".to_string(), "time period")
+    }
+
+    fn _time_range_check(start_time: &str, end_time: &str)  -> (bool, String){
+
+        let s_epoch = _epoch_alignment(start_time);
+        let e_epoch = _epoch_alignment(end_time);
+
+        let start_period = s_epoch.parse::<i64>().unwrap();
+        let end_period = e_epoch.parse::<i64>().unwrap();
+
+        if start_period - end_period >= 0 {
+
+            return (false, format!("Wrong time period - start: {:?}, end: {:?}", start_period, end_period))
+        } else if end_period - start_period > (86400*366*1000) {
+
+            return (false, format!("Wrong time period, over one years - start: {:?}, end: {:?}", start_period, end_period))
+        }  else {
+
+            return (true, "Ok".to_string())
+        }
+
+    }
+
+    fn _epoch_alignment(epoch: &str) -> String {
+
+        let epoch_len = epoch.to_string().len();
+
+        match epoch_len {
+            10 => {
+                let epoch_process = epoch.to_owned() + "000";
+                return epoch_process
+            }
+            13 => return epoch.to_string(),
+
+            _ => return epoch.to_string()
+        }
+
+    }
+}
+//Calculate the time interval of a table with date (more than one day)
+fn get_time_slices(start_time: i64, end_time: i64) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let start_day = start_time / 1000;
+    let s_naive_datetime = NaiveDateTime::from_timestamp(start_day, 0);
+    let start_datetime: DateTime<Utc> = DateTime::from_utc(s_naive_datetime, Utc);
+    let str_start_day = start_datetime.format("%Y-%m-%d").to_string();
+
+    let end_day = end_time / 1000;
+    let e_naive_datetime = NaiveDateTime::from_timestamp(end_day, 0);
+    let end_datetime: DateTime<Utc> = DateTime::from_utc(e_naive_datetime, Utc);
+    let str_end_day = end_datetime.format("%Y-%m-%d").to_string();
+
+    if str_start_day != str_end_day {
+        let days = (end_time - start_time) / (86400 * 1000);
+        let number_of_days = round::ceil(days as f64, 0) + 1.0;
+
+        let mut time_range_start = "".to_string();
+        let mut time_range_end = "".to_string();
+
+        let mut start_vec = Vec::new();
+        let mut end_vec = Vec::new();
+        let mut day_vec = Vec::new();
+
+        for i in 0..number_of_days as i64 {
+            //not format
+            let calendar_day :DateTime<Utc> = start_datetime + Duration::days(i);
+            day_vec.push(calendar_day.format("%Y-%m-%d").to_string());
+
+            if i == 0 {
+
+                time_range_start = start_time.to_string();
+                start_vec.push(time_range_start);
+            } else {
+
+                let timestamp = calendar_day.with_hour(0).unwrap().with_minute(0).unwrap().with_second(0).unwrap();
+                let str_timestamp = timestamp.timestamp_millis().to_string();
+                time_range_start = str_timestamp;
+                start_vec.push(time_range_start);
+            }
+
+            if i == number_of_days as i64 - 1 {
+                time_range_end = end_time.to_string();
+                end_vec.push(time_range_end);
+            } else {
+                let timestamp = calendar_day.with_hour(23).unwrap().with_minute(59).unwrap().with_second(59).unwrap();
+                let str_end_timestamp = timestamp.timestamp_millis();
+                time_range_end = str_end_timestamp.to_string();
+                end_vec.push(time_range_end);
+
+                if str_end_timestamp > end_time {
+                    time_range_end = str_end_timestamp.to_string();
+                    println!("end = {:?}", time_range_end);
+                    end_vec.push(time_range_end);
+                    break
+                }
+            }
+
+        }
+
+        return (day_vec, start_vec, end_vec);
+    } else {
+        let mut start_vec = Vec::new();
+        let mut end_vec = Vec::new();
+        let mut day_vec = Vec::new();
+        start_vec.push(start_time.to_string());
+        end_vec.push(end_time.to_string());
+        day_vec.push(str_start_day);
+
+        return (day_vec, start_vec, end_vec);
+    }
+}
+
+//The current function is to determine the query table, enter the primary key is a string or uuid.
+fn table_check(feature_name: &str, primary_key: &str, co_primary_key: &str, start_day: &str, end_day: &str) -> String {
+
+    //Use uuid as the primary key table
+    let mut converted_with_uuid_table = vec!["periodical_application_usage_per_ip", "sta_mgnt", "log_mgnt",
+                                             "periodical_cf_statistics_per_ip", "periodical_anti_virus_statistics_per_ip"];
+
+    let mut check_bool = false;
+    //Confirm that the query table conforms to the converted with date table.
+    //If it matches, return the boolean value true.
+    for table in converted_with_uuid_table.iter() {
+
+        if &feature_name == table {
+            check_bool = true;
+        }
+    }
+
+    //Change the feature name obtained by url to the table name of cassandra
+    let table_name = feature_to_table(feature_name);
+
+    //If check_bool is true, it means the primary key is uuid
+    if check_bool == true {
+        //primary key is uuid
+        return format!("SELECT * FROM nebula_device_data.{table_name} WHERE deviceid = {primary_key} AND date = '{co_primary_key}' \
+        AND epoch >= {start_day} AND epoch <= {end_day}",
+                       table_name=table_name, primary_key=primary_key, co_primary_key=co_primary_key, start_day=start_day, end_day=end_day);
+
+    } else {
+        //primary key is text
+        return format!("SELECT * FROM nebula_device_data.{table_name} WHERE deviceid = '{primary_key}' AND epoch >= {start_day} AND epoch <= {end_day}",
+                       table_name=table_name , primary_key=primary_key, start_day=start_day, end_day=end_day);
+    }
+
+}
+
+fn feature_replace(feature_name: &str) -> String{
+
+    if feature_name.contains("-") {
+        let feature = feature_name.replace("-", "_");
+        return feature.to_string()
+    } else if feature_name.contains("_") {
+        let feature = feature_name.replace("_", "-");
+        return feature.to_string()
+    } else {
+        let feature = feature_name.to_lowercase();
+        return feature.to_string()
+    }
+}
+
+unsafe fn data_result(primary_key: &str, co_primary_key: &str, feature_name: &str) -> HashMap<String, Value>{
     let cluster = create_cluster();
     let session = &mut *cass_session_new();
-
-    let uuid_gen = &mut *cass_uuid_gen_new();
 
     match connect_session(session, cluster) {
         Ok(_) => {}
@@ -310,9 +618,8 @@ unsafe fn cass_connect() -> LinkedList<String> {
         }
     }
 
-    let mut cass_result = LinkedList::new();
-    let cass_query = select_condition(session, "*", "examples", "new_user", "deviceid", "Kobe");
-    cass_result.push_back(cass_query);
+    execute_query(session, "USE nebula_device_data").unwrap();
+    let data= cassandra_use(session, primary_key, co_primary_key, feature_name);
 
     let close_future = cass_session_close(session);
     cass_future_wait(close_future);
@@ -320,37 +627,46 @@ unsafe fn cass_connect() -> LinkedList<String> {
 
     cass_cluster_free(cluster);
     cass_session_free(session);
+    data
+}
 
-    cass_uuid_gen_free(uuid_gen);
-    cass_result
+fn async_handler(url: Path<Url>) -> HttpResponse {
+
+    unsafe {
+
+        let data= data_result(url.deviceid.as_str(), url.epoch.as_str(), url.feature.as_str());
+
+        if data.get("msg").unwrap() == "unknown feature" ||
+            data.get("msg").unwrap() == "Wrong time period, over one years" ||
+            data.get("msg").unwrap() == "Wrong time period -" ||
+            data.get("msg").unwrap() == "time range should be integer!" {
+
+            HttpResponse::BadRequest()
+                .content_type("text/html")
+                .content_encoding(ContentEncoding::Gzip)
+                .json(data)
+        } else {
+            HttpResponse::Ok()
+                .content_type("text/html")
+                .content_encoding(ContentEncoding::Gzip)
+                .json(data)
+        }
+    }
+
 }
 
 fn main() {
 
-    CombinedLogger::init(
-        vec![
-            TermLogger::new(LevelFilter::Debug, Config::default()).unwrap(),
-            WriteLogger::new(LevelFilter::Trace, Config::default(), File::create("my_rust_binary.log").unwrap()),
-        ]
-    ).unwrap();
-
-    let mut cass = unsafe{cass_connect()};
-
-    println!("{:?}", cass);
-
-    let mut router = Router::new();
-    let localhost = "localhost:3009".to_string();
-
-    let handler = move |req: &mut Request| {
-        // convert the response struct to JSON
-        let out = serde_json::to_string(&cass).unwrap();
-        let content_type = "application/json".parse::<Mime>().unwrap();
-        Ok(Response::with((content_type, status::Ok, out)))
-    };
-
-    router.get("/", handler, "index");
-
-    info!("Listening on {}", localhost);
-    Iron::new(router).http(localhost).unwrap();
+    server::HttpServer::new(|| {
+        App::new()
+            .prefix("/data/1/")
+            .default_encoding(ContentEncoding::Gzip)
+            // async handler
+            .resource("{deviceid}/{epoch}/{feature}", |r| r.method(Method::GET).with(async_handler))
+    })
+        .workers(8)
+        .bind("0.0.0.0:3009")
+        .unwrap()
+        .run();
 
 }
