@@ -32,10 +32,15 @@ pub fn create_cluster() -> &'static mut CassCluster {
         let cluster = cass_cluster_new();
         let host = CString::new("127.0.0.1").unwrap();
         cass_cluster_set_contact_points(cluster, host.as_ptr());
+        cass_cluster_set_port(cluster, 9042);
+        cass_cluster_set_num_threads_io(cluster, 16);
+        cass_cluster_set_core_connections_per_host(cluster, 1);
+        cass_cluster_set_tcp_nodelay(cluster, cass_true);
+        cass_cluster_set_load_balance_round_robin(cluster);
         &mut *cluster
+
     }
 }
-
 pub fn execute_query(session: &mut CassSession, query: &str) -> Result<(), CassError> {
     unsafe {
         let cstring = CString::new(query);
