@@ -132,7 +132,7 @@ unsafe fn cassandra_connect(session: &mut CassSession, primary_key: &str, co_pri
 
     let mut has_more_pages = true;
     let table_name = feature_to_table(feature_name);
-    let table_bool = table_schema(session, "*", "nebula_device_data", table_name.as_str());
+    let table_bool = table_schema(session, "*", "example", table_name.as_str());
 
     //LinkedList,collect data for each query.
     let mut value_list = Vec::new();
@@ -154,7 +154,7 @@ unsafe fn cassandra_connect(session: &mut CassSession, primary_key: &str, co_pri
                 let result = cass_future_get_result(future);
                 let iterator = cass_iterator_from_result(result);
                 //looking for the value of column.The type of the return is Vec<String>
-                let mut column = column_schema(session, "*", "nebula_device_data", table_name.as_str());
+                let mut column = column_schema(session, "*", "example", table_name.as_str());
                 cass_future_free(future);
 
                 while cass_iterator_next(iterator) == cass_true {
@@ -579,13 +579,13 @@ fn table_check(feature_name: &str, primary_key: &str, co_primary_key: &str, star
     //If check_bool is true, it means the primary key is uuid
     if check_bool == true {
         //primary key is uuid
-        return format!("SELECT * FROM nebula_device_data.{table_name} WHERE deviceid = {primary_key} AND date = '{co_primary_key}' \
+        return format!("SELECT * FROM example.{table_name} WHERE deviceid = {primary_key} AND date = '{co_primary_key}' \
         AND epoch >= {start_day} AND epoch <= {end_day}",
                        table_name=table_name, primary_key=primary_key, co_primary_key=co_primary_key, start_day=start_day, end_day=end_day);
 
     } else {
         //primary key is text
-        return format!("SELECT * FROM nebula_device_data.{table_name} WHERE deviceid = '{primary_key}' AND epoch >= {start_day} AND epoch <= {end_day}",
+        return format!("SELECT * FROM example.{table_name} WHERE deviceid = '{primary_key}' AND epoch >= {start_day} AND epoch <= {end_day}",
                        table_name=table_name , primary_key=primary_key, start_day=start_day, end_day=end_day);
     }
 
@@ -618,7 +618,7 @@ unsafe fn data_result(primary_key: &str, co_primary_key: &str, feature_name: &st
         }
     }
 
-    execute_query(session, "USE nebula_device_data").unwrap();
+    execute_query(session, "USE example").unwrap();
     let data= cassandra_use(session, primary_key, co_primary_key, feature_name);
 
     let close_future = cass_session_close(session);
