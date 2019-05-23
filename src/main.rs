@@ -24,7 +24,6 @@ use simplelog::*;
 use cassandra_cpp_sys::*;
 use std::slice;
 use std::mem;
-use std::fs::File;
 use std::fs;
 use std::ffi::CString;
 use std::collections::LinkedList;
@@ -34,6 +33,7 @@ use std::str;
 use std::str::FromStr;
 use std::env;
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::fmt;
 
 use serde::*;
 use serde::{Deserialize, Serialize};
@@ -53,15 +53,13 @@ use futures::future::{result, FutureResult};
 use futures::{Future, Stream};
 use futures::sync::mpsc;
 use actix_web::http::{header, Method, StatusCode,};
-use bytes::Bytes;
 use futures::sink::Sink;
 use actix_web::server::HttpServer;
 use actix_web::http::header::ContentEncoding;
 
-use std::thread;
-use std::ptr::null;
 use std::os::raw::c_char;
 use std::io::prelude::*;
+use std::fs::File;
 
 #[derive(Deserialize)]
 struct Url {
@@ -70,20 +68,75 @@ struct Url {
     feature: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct Status {
+    msg: Msg,
+    result: Msg,
+    data: Value,
+}
+
+#[derive(Debug, Clone, Copy,
+PartialEq, Eq,)]
+enum Msg {
+    Failed,
+    Ok,
+    UnknownFeature,
+    WrongTimePeriod(Option<WrongTimePeriodReason>),
+    TimeRangeShouldBeInteger,
+    InvalidTimeRange,
+}
+#[derive(Debug, Clone, Copy,
+PartialEq, Eq,)]
+enum WrongTimePeriodReason {
+    OverOneYear,
+}
+
+#[derive(Debug)]
+enum CassandraError {
+    UnknownFeature,
+}
+
+impl Serialize for Msg {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+    {
+        use self::Msg::*;
+        use self::WrongTimePeriodReason::*;
+        serializer.serialize_str(match *self {
+            | Failed => "failed",
+            | Ok => "ok",
+            | UnknownFeature => "unknown feature",
+            | WrongTimePeriod(Some(OverOneYear)) => "Wrong time period, over one years",
+            | WrongTimePeriod(None) => "Wrong time period -",
+            | TimeRangeShouldBeInteger => "time range should be integer!",
+            | InvalidTimeRange => "invalid time range",
+        })
+    }
+}
+
+impl fmt::Display for CassandraError {
+    fn fmt (&self, f: &mut fmt::Formatter)-> fmt::Result {
+        write!(f, "unknown feature")
+    }
+}
+
 const CASS_UUID_STRING_LENGTH: usize = 37;
 const CASS_INET_STRING_LENGTH: usize = 46;
 
-unsafe fn cassandra_use(session: &mut CassSession, primary_key: &str, co_primary_key: &str, feature_name: &str) -> HashMap<String, Value> {
+unsafe fn cassandra_use(session: &mut CassSession, primary_key: &str, co_primary_key: &str, feature_name: &str) -> Status {
+
+//    info!("{:?}/{:?}/{:?}", primary_key, co_primary_key, feature_name);
 
     let feature = feature_replace(feature_name);
-
-    let mut status_map = HashMap::new();
-//    let mut status_map = serde_json::Map::new();
     let mut result_link = Vec::new();
-    let mut status_link = Vec::new();
 
     // If status_bool is true, status_result is null
     let (status_result, status_bool) = time_status(co_primary_key);
+
+    if status_bool == false {
+        return status_result
+    }
 
     let (start, end, status) = split_once(co_primary_key);
 
@@ -94,54 +147,62 @@ unsafe fn cassandra_use(session: &mut CassSession, primary_key: &str, co_primary
     let (date, start_time, end_time) = get_time_slices( start_timestamp, end_timestamp);
 
     for (day, (start,end)) in date.iter().zip(start_time.iter().zip(end_time)) {
-        let (cass_data, cass_status) = cassandra_connect(session, primary_key, &day, &feature, &start, &end);
 
-        if cass_status.contains("ok") {
-            result_link.extend(cass_data);
-        } else {
-            status_link.push(cass_status);
+        match cassandra_connect(session, primary_key, &day, &feature, &start, &end) {
+            Ok(cass_data) => {
+                result_link.extend(cass_data)
+            },
+            Err(CassandraError::UnknownFeature) => {
+                let data_to_json = to_value(result_link).expect("data type was vec");
+                error!("unknown feature");
+                return Status {
+                    msg: Msg::UnknownFeature,
+                    result: Msg::Failed,
+                    data: data_to_json
+                }
+            }
+        }
+
+    }
+
+    match result_link.len() {
+        0 => {
+            let data_to_json = to_value(result_link).expect("data type was vec");
+            warn!("data is null");
+            return Status {
+                msg: Msg::Ok,
+                result: Msg::Ok,
+                data: data_to_json,
+            };
+        }
+        _ => {
+            let data_to_json = to_value(result_link).expect("data type was vec");
+            return Status {
+                msg: Msg::Ok,
+                result: Msg::Ok,
+                data: data_to_json,
+            };
         }
     }
-
-    if status_link.contains(&"unknown feature".to_string()) {
-        error!("unknown feature");
-        let data_to_json = to_value(result_link).expect("data type was vec");
-        status_map.insert("msg".to_string(), Value::String("unknown feature".to_string()));
-        status_map.insert("result".to_string(), Value::String("unknown feature".to_string()));
-        status_map.insert("data".to_string(), data_to_json);
-        return status_map
-    } else if result_link.len() == 0 {
-        let data_to_json = to_value(result_link).expect("data type was vec");
-        status_map.insert("msg".to_string(), Value::String("ok".to_string()));
-        status_map.insert("result".to_string(), Value::String("ok".to_string()));
-        status_map.insert("data".to_string(), data_to_json);
-        return status_map
-    }
-
-    let data_to_json = to_value(result_link).expect("data type was vec");
-    status_map.insert("msg".to_string(), Value::String("ok".to_string()));
-    status_map.insert("result".to_string(), Value::String("ok".to_string()));
-    status_map.insert("data".to_string(), data_to_json);
-    status_map
-
 }
 
-//return type is LinkedList
 unsafe fn cassandra_connect(session: &mut CassSession, primary_key: &str, co_primary_key: &str, feature_name: &str, start_day: &str, end_day: &str)
-    -> (Vec<HashMap<&'static str, Value>>, String) {
+                            ->  Result<Vec<HashMap<&'static str, Value>>, CassandraError,> {
 
     let mut has_more_pages = true;
     let table_name = feature_to_table(feature_name);
-    let table_bool = table_schema(session, "*", "example", table_name.as_str());
+    let condition = "*";
+    let keyspace = "nebula_device_data";
+    let table_bool = table_schema(session, condition, keyspace, &table_name);
 
-    //LinkedList,collect data for each query.
     let mut value_list = Vec::new();
 
     if table_bool == false {
-        return (value_list, "unknown feature".to_string())
+        return Err(CassandraError::UnknownFeature)
     }
 
     let query_check = table_check(feature_name, primary_key, co_primary_key, start_day, end_day);
+//    info!("{:?}", query_check);
 
     let statement = cass_statement_new(CString::new(query_check).unwrap().as_ptr(), 0);
     cass_statement_set_paging_size(statement, 100);
@@ -154,7 +215,7 @@ unsafe fn cassandra_connect(session: &mut CassSession, primary_key: &str, co_pri
                 let result = cass_future_get_result(future);
                 let iterator = cass_iterator_from_result(result);
                 //looking for the value of column.The type of the return is Vec<String>
-                let mut column = column_schema(session, "*", "example", table_name.as_str());
+                let mut column = column_schema(session, condition, keyspace, &table_name);
                 cass_future_free(future);
 
                 while cass_iterator_next(iterator) == cass_true {
@@ -198,7 +259,7 @@ unsafe fn cassandra_connect(session: &mut CassSession, primary_key: &str, co_pri
         }
     }
     cass_statement_free(statement);
-    (value_list, "ok".to_string())
+    Ok(value_list)
 
 }
 
@@ -257,8 +318,8 @@ unsafe fn parse_value(items_number_value : *const CassValue_) -> Value {
         CASS_VALUE_TYPE_TEXT |
         CASS_VALUE_TYPE_ASCII |
         CASS_VALUE_TYPE_VARCHAR => {
-            let mut text = mem::zeroed();
-            let mut text_length = mem::zeroed();
+            let mut text: *const c_char = ::std::ptr::null();
+            let mut text_length: usize = 0;
             cass_value_get_string(items_number_value, &mut text, &mut text_length);
             let utf8_result = raw2utf8(text, text_length).unwrap();
 
@@ -298,6 +359,14 @@ unsafe fn parse_value(items_number_value : *const CassValue_) -> Value {
             let val = Value::Number(i.into());
             return val
         }
+        CASS_VALUE_TYPE_DOUBLE |
+        CASS_VALUE_TYPE_FLOAT => {
+            let mut d: f64 = 0.0;
+            cass_value_get_double(items_number_value, &mut d);
+            //'''Value::Number''' does not support floating point conversion
+            let val = json!(d);
+            return val
+        }
         CASS_VALUE_TYPE_TIMESTAMP => {
             let mut t: i64 = 0;
             cass_value_get_int64(items_number_value, &mut t);
@@ -326,7 +395,13 @@ unsafe fn parse_value(items_number_value : *const CassValue_) -> Value {
             let mut buf: Vec<c_char> = Vec::with_capacity(CASS_INET_STRING_LENGTH);
             cass_inet_string(inet, buf.as_mut_ptr());
             let new_buf: String = CStr::from_ptr(buf.as_mut_ptr()).to_str().unwrap().into();
-            return Value::String(new_buf)
+
+            if new_buf.contains("::") {
+                return Value::Null
+            } else {
+                return Value::String(new_buf)
+            }
+
         }
         CASS_VALUE_TYPE_LIST => {
             let mut list = Vec::new();
@@ -345,41 +420,57 @@ unsafe fn parse_value(items_number_value : *const CassValue_) -> Value {
 }
 
 //This function handles time-related status messages
-fn time_status(co_primary_key: &str) -> (HashMap<&str, Value>, bool) {
+fn time_status(co_primary_key: &str) -> (Status, bool) {
 
-    let mut status_link = Vec::new();
+    let (start_time, end_time, status_msg) = split_once(co_primary_key);
+    let data: Vec<Value> = Vec::new();
 
-    let mut status_map = HashMap::new();
-
-    let (start_time, end_time, status) = split_once(co_primary_key);
-
-    if status.contains("time range should be integer!" ) {
+    if status_msg.contains("time range should be integer!" ) {
+        let status = Status {
+            msg: Msg::TimeRangeShouldBeInteger,
+            result: Msg::Failed,
+            data: Value::Array(data)
+        };
         error!("{:?}", status);
-        status_map.insert("msg", Value::String("time range should be integer!".to_string()));
-        status_map.insert("result", Value::String("failed".to_string()));
-        status_map.insert("data", Value::Array(status_link));
-        return (status_map, false)
-    } else if status.contains("Wrong time period, over one years") {
-        let start_period = start_time.parse::<i64>().unwrap();
-        let end_period = end_time.parse::<i64>().unwrap();
-        let status_format = format!("Wrong time period, over one years - start: {:?}, end: {:?}", start_period, end_period);
-        error!("{:?}", status);
-        status_map.insert("msg", Value::String(status_format));
-        status_map.insert("result", Value::String("failed".to_string()));
-        status_map.insert("data", Value::Array(status_link));
-        return (status_map, false)
-    } else if status.contains("Wrong time period") {
-        let start_period = start_time.parse::<i64>().unwrap();
-        let end_period = end_time.parse::<i64>().unwrap();
-        let status_format = format!("Wrong time period - start: {:?}, end: {:?}", start_period, end_period);
+        return (status, false);
+
+    } else if status_msg.contains("Wrong time period, over one years") {
+        let status_format = format!("Wrong time period, over one years - start: {:?}, end: {:?}", start_time, end_time);
         error!("{:?}", status_format);
-        status_map.insert("msg", Value::String(status_format));
-        status_map.insert("result", Value::String("failed".to_string()));
-        status_map.insert("data", Value::Array(status_link));
-        return (status_map, false)
+        use crate::WrongTimePeriodReason::OverOneYear;
+        let status = Status {
+            msg: Msg::WrongTimePeriod(Some(OverOneYear)),
+            result: Msg::Failed,
+            data: Value::Array(data)
+        };
+
+        return (status, false);
+    } else if status_msg.contains("Wrong time period") {
+        let status_format = format!("Wrong time period - start: {:?}, end: {:?}", start_time, end_time);
+        error!("{:?}", status_format);
+        let status = Status {
+            msg: Msg::WrongTimePeriod(None),
+            result: Msg::Failed,
+            data: Value::Array(data)
+        };
+        return (status, false);
+    } else if status_msg.contains("invalid time range") {
+        error!("{:?}", status_msg);
+        let status = Status {
+            msg: Msg::InvalidTimeRange,
+            result: Msg::Failed,
+            data: Value::Array(data)
+        };
+        return (status, false);
     }
 
-    (status_map, true)
+    let status = Status {
+        msg: Msg::Ok,
+        result: Msg::Ok,
+        data: Value::Array(data)
+    };
+
+    (status, true)
 }
 
 //Change the feature name obtained by url to the table name of cassandra
@@ -433,9 +524,6 @@ fn split_once(in_string: &str) -> (String, String, &str) {
             let e_epoch = _epoch_alignment(second);
             return (s_epoch, e_epoch, "Ok")
 
-        } else if status.contains("time range should be integer!" ) {
-            return (first.to_string(), second.to_string(), "time range should be integer!")
-
         } else if  status.contains("Wrong time period, over one years" ) {
             return (first.to_string(), second.to_string(), "Wrong time period, over one years")
 
@@ -443,8 +531,8 @@ fn split_once(in_string: &str) -> (String, String, &str) {
             return (first.to_string(), second.to_string(), "Wrong time period")
         }
     } else {
-        error!("Wrong time period");
-        return (in_string.to_string(), "Wrong".to_string(), "time period")
+        error!("invalid time range");
+        return (in_string.to_string(), "Wrong".to_string(), "invalid time range")
     }
 
     fn _time_range_check(start_time: &str, end_time: &str)  -> (bool, String){
@@ -579,13 +667,13 @@ fn table_check(feature_name: &str, primary_key: &str, co_primary_key: &str, star
     //If check_bool is true, it means the primary key is uuid
     if check_bool == true {
         //primary key is uuid
-        return format!("SELECT * FROM example.{table_name} WHERE deviceid = {primary_key} AND date = '{co_primary_key}' \
+        return format!("SELECT * FROM nebula_device_data.{table_name} WHERE deviceid = {primary_key} AND date = '{co_primary_key}' \
         AND epoch >= {start_day} AND epoch <= {end_day}",
                        table_name=table_name, primary_key=primary_key, co_primary_key=co_primary_key, start_day=start_day, end_day=end_day);
 
     } else {
         //primary key is text
-        return format!("SELECT * FROM example.{table_name} WHERE deviceid = '{primary_key}' AND epoch >= {start_day} AND epoch <= {end_day}",
+        return format!("SELECT * FROM nebula_device_data.{table_name} WHERE deviceid = '{primary_key}' AND epoch >= {start_day} AND epoch <= {end_day}",
                        table_name=table_name , primary_key=primary_key, start_day=start_day, end_day=end_day);
     }
 
@@ -605,7 +693,7 @@ fn feature_replace(feature_name: &str) -> String{
     }
 }
 
-unsafe fn data_result(primary_key: &str, co_primary_key: &str, feature_name: &str) -> HashMap<String, Value>{
+unsafe fn data_result(primary_key: &str, co_primary_key: &str, feature_name: &str) -> Status {
     let cluster = create_cluster();
     let session = &mut *cass_session_new();
 
@@ -618,7 +706,7 @@ unsafe fn data_result(primary_key: &str, co_primary_key: &str, feature_name: &st
         }
     }
 
-    execute_query(session, "USE example").unwrap();
+    execute_query(session, "USE nebula_device_data").unwrap();
     let data= cassandra_use(session, primary_key, co_primary_key, feature_name);
 
     let close_future = cass_session_close(session);
@@ -632,27 +720,16 @@ unsafe fn data_result(primary_key: &str, co_primary_key: &str, feature_name: &st
 
 fn async_handler(url: Path<Url>) -> HttpResponse {
 
-    unsafe {
+    let data= unsafe { data_result(&url.deviceid, &url.epoch, &url.feature)};
 
-        let data= data_result(url.deviceid.as_str(), url.epoch.as_str(), url.feature.as_str());
-
-        if data.get("msg").unwrap() == "unknown feature" ||
-            data.get("msg").unwrap() == "Wrong time period, over one years" ||
-            data.get("msg").unwrap() == "Wrong time period -" ||
-            data.get("msg").unwrap() == "time range should be integer!" {
-
-            HttpResponse::BadRequest()
-                .content_type("text/html")
-                .content_encoding(ContentEncoding::Gzip)
-                .json(data)
-        } else {
-            HttpResponse::Ok()
-                .content_type("text/html")
-                .content_encoding(ContentEncoding::Gzip)
-                .json(data)
-        }
-    }
-
+    let mut response_builder = match data.msg {
+        | Msg::Ok => HttpResponse::Ok(),
+        | _ => HttpResponse::BadRequest(),
+    };
+    response_builder
+        .content_type("text/html")
+        .content_encoding(ContentEncoding::Gzip)
+        .json(data) // here is where Serialize comes into playz
 }
 
 fn main() {
@@ -668,5 +745,4 @@ fn main() {
         .bind("0.0.0.0:3009")
         .unwrap()
         .run();
-
 }
