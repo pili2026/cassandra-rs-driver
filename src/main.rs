@@ -10,10 +10,11 @@ extern crate simplelog;
 extern crate serde_derive;
 extern crate serde;
 extern crate serde_json;
-extern crate serde_yaml;
 extern crate chrono;
-extern crate math;
 extern crate time;
+
+#[macro_use]
+extern crate lazy_static;
 
 mod connect_util;
 mod schema_util;
@@ -123,6 +124,24 @@ impl fmt::Display for CassandraError {
 
 const CASS_UUID_STRING_LENGTH: usize = 37;
 const CASS_INET_STRING_LENGTH: usize = 46;
+
+lazy_static! {
+    static ref SESSION: &'static mut CassSession = unsafe {
+        let cluster = create_cluster();
+        let mut session_new = &mut *cass_session_new();
+
+        let session_match = match connect_session(session_new, cluster) {
+            Ok(_) => {session_new}
+            _=> {
+                cass_cluster_free(cluster);
+                cass_session_free(session_new);
+                panic!();
+            }
+        };
+        session_match
+    };
+}
+
 
 unsafe fn cassandra_use(session: &mut CassSession, primary_key: &str, co_primary_key: &str, feature_name: &str) -> Status {
 
@@ -694,27 +713,17 @@ fn feature_replace(feature_name: &str) -> String{
 }
 
 unsafe fn data_result(primary_key: &str, co_primary_key: &str, feature_name: &str) -> Status {
-    let cluster = create_cluster();
-    let session = &mut *cass_session_new();
 
-    match connect_session(session, cluster) {
-        Ok(_) => {}
-        _ => {
-            cass_cluster_free(cluster);
-            cass_session_free(session);
-            panic!();
-        }
-    }
+    execute_query(*SESSION, "USE nebula_device_data").unwrap();
+//    let data= cassandra_use(session, &deviceid, &epoch, &feature);
+    let data= cassandra_use(*SESSION, deviceid,  epoch, feature);
 
-    execute_query(session, "USE nebula_device_data").unwrap();
-    let data= cassandra_use(session, primary_key, co_primary_key, feature_name);
-
-    let close_future = cass_session_close(session);
+    let close_future = cass_session_close(*SESSION);
     cass_future_wait(close_future);
     cass_future_free(close_future);
 
-    cass_cluster_free(cluster);
-    cass_session_free(session);
+//    cass_cluster_free(cluster);
+    cass_session_free(*SESSION);
     data
 }
 
