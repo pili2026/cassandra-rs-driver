@@ -1,0 +1,10 @@
+tsc:
+  ip: '127.0.0.1'
+  port: 9042
+thread:
+  num: 8
+web:
+  worker: 8
+  port: '3009'
+log:
+  path: '/home/ubuntu/log/'
