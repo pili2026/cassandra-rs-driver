@@ -269,6 +269,15 @@ pub fn cql_syntax(table_name: &str, dev: &str, date: &str, start_day: &str, end_
 }
 
 //The current function is to determine the query table, enter the primary key is a string or uuid.
+pub fn cql_filter_syntax(table_name: &str, dev: &str, start_day: &str, end_day: &str) -> String {
+
+    //primary key is text
+    return format!("SELECT * FROM nebula_device_data.{table_name} WHERE deviceid = '{dev}' AND epoch >= {start_day} AND epoch < {end_day}",
+                   table_name=table_name , dev=dev, start_day=start_day, end_day=end_day);
+
+}
+
+//The current function is to determine the query table, enter the primary key is a string or uuid.
 pub fn post_cql_syntax(table_name: &str, dev: &str, date: &str, start_day: &str, end_day: &str, field: &str) -> String {
 
     //Use uuid as the primary key table
@@ -311,6 +320,21 @@ pub fn post_cql_syntax(table_name: &str, dev: &str, date: &str, start_day: &str,
             }
         }
 
+    }
+}
+
+//The current function is to determine the query table, enter the primary key is a string or uuid.
+pub fn post_cql_filter_syntax(table_name: &str, dev: &str, start_day: &str, end_day: &str, field: &str) -> String {
+
+    match field {
+        "" => {
+            return format!("SELECT * FROM nebula_device_data.{table_name} WHERE deviceid = '{dev}' AND epoch >= {start_day} AND epoch < {end_day}",
+                           table_name=table_name , dev=dev, start_day=start_day, end_day=end_day);
+        }
+        _ =>{
+            return format!("SELECT {field} FROM nebula_device_data.{table_name} WHERE deviceid = '{dev}' AND epoch >= {start_day} AND epoch < {end_day}",
+                           field=field ,table_name=table_name , dev=dev, start_day=start_day, end_day=end_day);
+        }
     }
 }
 
