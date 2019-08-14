@@ -74,5 +74,4 @@ pub fn column_schema_inspection(session: &Session, condition: Vec<&str>, table_n
     }
 
     true
-
 }
