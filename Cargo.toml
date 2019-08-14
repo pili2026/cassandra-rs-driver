@@ -17,8 +17,10 @@ libmath = "0.2.1"
 time = "0.1.42"
 uuid = "0.7"
 eui48 = "0.4.6"
+multizip = "0.1.0"
 
 actix = "^0.8.3"
 actix-web = "^1.0.3"
 
 config = "0.9.3"
+
