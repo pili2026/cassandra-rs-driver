@@ -1,11 +1,10 @@
-# data-service-rs #
+# cassandra-rs-driver #
 
-## Create data-service rust version develop environment in build machine
+## Create cassandra-rs-driver application rust version develop environment in build machine
 
 ### Pre-requirement
 
 * The shell of the ubuntu environment is installed in the program folder, 
-* which can be executed directly and completed according to the command line prompt.
 
 ```bash requirement_install.sh```
 
