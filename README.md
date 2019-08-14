@@ -1,9 +1,8 @@
 # data-service-rs #
 
-## Create data-service rust version develop environment
+## Create data-service rust version develop environment in build machine
 
-# Pre-requirement
-
+### Pre-requirement
 
 * The shell of the ubuntu environment is installed in the program folder, 
 * which can be executed directly and completed according to the command line prompt.
@@ -11,7 +10,7 @@
 ```bash requirement_install.sh```
 
 1.  The program built environment is ubuntu 18.04.
-    Install Ubuntu environment related(curl, git).
+    Install ubuntu environment related package in [target machine].
 
     If not installed:
     ```
@@ -37,14 +36,19 @@
     sudo apt install g++-multilib=4:7.4.0-1ubuntu2.3
     ```
     
-2. Rust install
+2. Install rust in [target machine]
      
     install rust 
     ```
     curl https://sh.rustup.rs -sSf | sh
     ```
-    Just need install default toolchain.
-    add Rust to your system PATH manually .
+    
+    install default toolchain
+    ```
+    input >1
+    ```
+    
+    add Rust to your system PATH manually.
     ```
     source $HOME/.cargo/env
     ```
@@ -64,7 +68,7 @@
     ```
     cargo --version
     ```
-3.  Cassandra driver install
+3.  Install cassandra library in [target machine]
 
     Download and install cassandra-cpp dependencies(libuv), have *-dbg, *-dev, driver.
     
@@ -102,18 +106,28 @@
     sudo dpkg -i cassandra-cpp-driver-dbg_2.12.0-1_amd64.deb
     ```
     __Make sure that the driver (specifically libcassandra_static.a and libcassandra.so) are in your “/usr/local/lib64/” or “/usr/lib/x86_64-linux-gnu/” directory__
+     ```
+     sudo find / -name libcassandra_static.a
+     sudo find / -name libcassandra.so
+     ```
     
-# Build rust code(data service)
+### Build rust code in [target machine]
 
 1. clone rust code
 2. Enter the folder of the rust project(code fold name is data-service-rs):
     ```
     cd data-service-rs
     ```
-3. Confirm config argument, config location in ```/data-service-rs/config```, name is ```data-service-config.yaml```:
+3. Build rust code, use release version:
+    ```
+    cargo build --release
+    ```
+4. If you want to execute data-service directly in [target machine]
+   
+  * First,configuring data-service-config.yaml in the location you want
     ```
     tsc:
-      ip: '127.0.0.1'
+      ip: '10.111.11.114,10.111.11.159'
       port: 9042
     thread:
       num: 8
@@ -122,26 +136,18 @@
     log:
       path: '/home/ubuntu/data-service-log/'
     ```
-    
-4. Create a folder for the log file:
+  *  Second,create a folder for the log file:
+  
     ```
     mkdir /home/ubuntu/data-service-log/
     ```
-    
-5. Build rust code, use release version:
-    ```
-    cargo build --release
-    ```
 
-6. Build data-service for systemd,configuring data-service.service in __/etc/systemd/system/__:
+  * Final,execute data-service
     ```
-    [Unit]
-    Description=cassandra-rs-driver
-    After=network.target
+    directly execute data-service-rs from cargo
+    > cargo run --release /path/your/data-service-config.yaml
     
-    [Service]
-    ExecStart=/home/ubuntu/data-service-rs/target/release/data-service-rs /home/ubuntu/data-service-rs/data-service-config.yaml
-    [Install]
-    WantedBy=multi-user.target
-    ```
+    or,execute data-service-rs binary
+    > ./data-service-rs/target/release/data-service-rs /path/your/data-service-config.yaml
 
+    ```
