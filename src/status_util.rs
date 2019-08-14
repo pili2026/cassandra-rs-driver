@@ -107,7 +107,7 @@ impl Serialize for Msg {
             | UuidFormedBadly => "badly formed hexadecimal UUID string",
             | MacFormedBadly => "badly formed hexadecimal MAC string",
             | UnknownFilter => "unknown filter field",
-            | NotEnoughValues => "not enough values to unpack (expected 2, got 1)",
+            | NotEnoughValues => "not enough values to unpack",
         })
     }
 }
