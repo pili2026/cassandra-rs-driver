@@ -136,10 +136,9 @@
       path: '/home/ubuntu/data-service-log/'
     ```
   *  Second,create a folder for the log file:
-  
-    ```
-    mkdir /home/ubuntu/data-service-log/
-    ```
+        ```
+        mkdir /home/ubuntu/data-service-log/
+        ```
 
   * Final,execute data-service
     ```
